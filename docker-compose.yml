@@ -1,0 +1,112 @@
+services:
+  gateway:
+    build: ./gateway
+    ports:
+      - "8000:80"
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - delivery_net
+
+  migrate:
+    build: ./backend
+    command: sh -c "alembic upgrade head && python seed.py"
+    environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/delivery
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - delivery_net
+    restart: "no"
+
+  backend:
+    build: ./backend
+    deploy:
+      replicas: 2
+    environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/delivery
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - delivery_net
+
+  worker:
+    build:
+      context: ./backend
+    command: celery -A app.worker.celery_app worker --loglevel=info
+    environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/delivery
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - db
+      - redis
+    networks:
+      - delivery_net
+
+  frontend:
+    build: ./frontend
+    environment:
+      - VITE_API_URL=/api
+    networks:
+      - delivery_net
+
+  db:
+    image: postgres:15-alpine
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: delivery
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d delivery"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - delivery_net
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - delivery_net
+
+  prometheus:
+    image: prom/prometheus
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+    networks:
+      - delivery_net
+
+  grafana:
+    image: grafana/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - delivery_net
+
+volumes:
+  pgdata:
+
+networks:
+  delivery_net:
+    driver: bridge
