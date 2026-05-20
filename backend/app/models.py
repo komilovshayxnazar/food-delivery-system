@@ -61,6 +61,5 @@ class Order(Base):
     restaurant = relationship("Restaurant", back_populates="orders")
     courier = relationship("Courier", back_populates="orders")
 
-# Indexing for optimization (R6)
 Index('idx_order_status', Order.status)
 Index('idx_restaurant_rating', Restaurant.rating)

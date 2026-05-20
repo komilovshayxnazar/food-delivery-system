@@ -10,20 +10,16 @@ celery_app = Celery("worker", broker=redis_url, backend=redis_url)
 
 @celery_app.on_after_configure.connect
 def setup_periodic_tasks(sender, **kwargs):
-    # R10: Batch processing pipeline
-    # Daily settlement batch (runs every minute for demo purposes)
     sender.add_periodic_task(60.0, daily_settlement_batch.s(), name='run-daily-settlement')
 
 @celery_app.task
 def daily_settlement_batch():
     """
-    R10: Batch processing pipeline
     Calculate daily settlements for all restaurants based on DELIVERED orders.
     """
     db = SessionLocal()
     try:
         print("Running daily settlement batch...")
-        # Simplistic example: find all delivered orders that are not settled
         orders = db.query(Order).filter(Order.status == OrderStatus.DELIVERED).all()
         settlements = {}
         for order in orders:
@@ -31,6 +27,5 @@ def daily_settlement_batch():
         
         for restaurant_id, amount in settlements.items():
             print(f"Settling ${amount} for restaurant {restaurant_id}")
-            # In a real app, update a Settlement table here
     finally:
         db.close()

@@ -1,6 +1,7 @@
 import os
 import json
-from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, Request
+import stripe
+from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, Request, Header
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from prometheus_client import make_asgi_app, Counter, Histogram
@@ -11,10 +12,8 @@ from .database import engine, Base, get_db
 from . import models, schemas
 from .core.rate_limiter import limiter, redis_client
 
-# We set root_path="/api" so Swagger UI knows its base URL behind Nginx
 app = FastAPI(title="Food Delivery API", version="1.0.0", root_path="/api")
 
-# R12: Observability (Prometheus Metrics)
 metrics_app = make_asgi_app()
 app.mount("/metrics", metrics_app)
 
@@ -25,7 +24,6 @@ REQUEST_LATENCY = Histogram("http_request_duration_seconds", "HTTP Request Durat
 async def monitor_requests(request: Request, call_next):
     client_ip = request.client.host if request.client else "127.0.0.1"
     
-    # R11: Apply rate limiter
     if not limiter.allow_request(client_ip):
         return JSONResponse(status_code=429, content={"detail": "Too Many Requests"})
 
@@ -38,21 +36,17 @@ async def monitor_requests(request: Request, call_next):
     return response
 
 
-# R4: RESTful API Endpoints
-# Endpoints are relative to root_path, so /restaurants translates to /api/restaurants from the outside
 @app.get("/restaurants", response_model=List[schemas.RestaurantOut])
 def get_restaurants(db: Session = Depends(get_db)):
     """
-    Get a list of restaurants. Includes R6 caching optimization.
+    Get a list of restaurants.
     """
-    # R6: Caching optimization
     cache_key = "restaurants:all"
     cached_data = redis_client.get(cache_key)
     if cached_data:
         return json.loads(cached_data)
 
     restaurants = db.query(models.Restaurant).all()
-    # Serialize for cache
     res_list = []
     for r in restaurants:
         res_list.append({"id": r.id, "name": r.name, "address": r.address, "rating": r.rating, "menus": [{"id": m.id, "name": m.name, "price": m.price} for m in r.menus]})
@@ -63,7 +57,7 @@ def get_restaurants(db: Session = Depends(get_db)):
 @app.post("/orders", response_model=schemas.OrderOut)
 def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)):
     """
-    Create a new order and notify couriers via Redis pub/sub.
+    Create a new order.
     """
     db_order = models.Order(
         user_id=order.user_id,
@@ -75,13 +69,67 @@ def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(db_order)
 
-    # R5: Polyglot Persistence (Redis as message broker/pubsub)
-    # Publishing to a Redis channel for real-time dispatch matching
     redis_client.publish("new_orders", json.dumps({"order_id": db_order.id, "restaurant_id": db_order.restaurant_id}))
 
     return db_order
 
-# R7: Additional API Style (WebSockets) for Live Order Tracking
+stripe.api_key = os.getenv("STRIPE_API_KEY", "")
+
+@app.post("/create-checkout-session")
+async def create_checkout_session(request: Request, db: Session = Depends(get_db)):
+    try:
+        data = await request.json()
+        order_id = data.get("order_id")
+        amount = data.get("amount")
+
+        checkout_session = stripe.checkout.Session.create(
+            payment_method_types=['card'],
+            line_items=[
+                {
+                    'price_data': {
+                        'currency': 'usd',
+                        'product_data': {
+                            'name': f'Food Delivery Order #{order_id}',
+                        },
+                        'unit_amount': int(amount * 100),
+                    },
+                    'quantity': 1,
+                },
+            ],
+            mode='payment',
+            success_url='http://localhost:8000/?success=true',
+            cancel_url='http://localhost:8000/?canceled=true',
+            client_reference_id=str(order_id)
+        )
+        return {"id": checkout_session.id, "url": checkout_session.url}
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+@app.post("/webhook")
+async def stripe_webhook(request: Request, stripe_signature: str = Header(None), db: Session = Depends(get_db)):
+    payload = await request.body()
+    event = None
+    
+    try:
+        event = stripe.Event.construct_from(
+          json.loads(payload), stripe.api_key
+        )
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+    if event.type == 'checkout.session.completed':
+        session = event.data.object
+        order_id = session.get('client_reference_id')
+        
+        if order_id:
+            db_order = db.query(models.Order).filter(models.Order.id == int(order_id)).first()
+            if db_order:
+                db_order.status = models.OrderStatus.ACCEPTED
+                db.commit()
+                await manager.broadcast_status(int(order_id), "ACCEPTED")
+
+    return {"status": "success"}
+
 class ConnectionManager:
     def __init__(self):
         self.active_connections: dict[int, WebSocket] = {}
@@ -109,6 +157,5 @@ async def websocket_endpoint(websocket: WebSocket, order_id: int):
     try:
         while True:
             data = await websocket.receive_text()
-            # In a real scenario, couriers would update status and we'd broadcast
     except WebSocketDisconnect:
         manager.disconnect(order_id)

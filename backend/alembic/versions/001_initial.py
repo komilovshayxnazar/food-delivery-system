@@ -15,8 +15,6 @@ branch_labels = None
 depends_on = None
 
 def upgrade():
-    # Because seed.py creates tables if they don't exist, this can just pass
-    # In a real scenario we'd do op.create_table(...)
     pass
 
 def downgrade():

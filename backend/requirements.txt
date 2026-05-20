@@ -8,3 +8,4 @@ celery
 prometheus-client
 websockets
 pydantic-settings
+stripe

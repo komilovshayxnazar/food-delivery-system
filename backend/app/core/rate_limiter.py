@@ -7,8 +7,7 @@ redis_client = redis.Redis.from_url(redis_url, decode_responses=True)
 
 class TokenBucketRateLimiter:
     """
-    R11: From-Scratch System Component
-    A Token Bucket rate limiter using Redis as a backend to allow distributed rate limiting.
+    Token Bucket rate limiter using Redis for distributed rate limiting.
     """
     def __init__(self, capacity: int, refill_rate: float):
         self.capacity = capacity

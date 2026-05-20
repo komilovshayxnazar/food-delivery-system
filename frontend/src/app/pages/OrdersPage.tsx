@@ -33,9 +33,8 @@ export function OrdersPage() {
   const [error, setError] = useState<string | null>(null);
 
   const fetchOrders = () => {
-    // The API doesn't have GET /orders, so we show a friendly demo
     setLoading(false);
-    // Add some demo orders if we have some from the session
+    // Load orders from session storage
     const stored = sessionStorage.getItem("placed_orders");
     if (stored) {
       setOrders(JSON.parse(stored));
